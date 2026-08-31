@@ -52,8 +52,7 @@ int main(int argc, char *argv[]) {
     FILE *fpout = NULL;
 
     // 2. Read configuration file FIRST
-    read_input(&ham_params, &lat_params, &mc_params, &adam_params, &t_params, 
-               &inversion, &realization, &time_evol, &opt_time, &Bell, &use_heavy_hex);
+    read_input(&ham_params, &lat_params, &mc_params, &adam_params, &t_params, &inversion, &realization, &time_evol, &opt_time, &Bell, &use_heavy_hex);
 
     // 3. Build lattice topology to determine system sizes
     if (use_heavy_hex) {
@@ -116,6 +115,15 @@ int main(int argc, char *argv[]) {
     double best_loss = 1e9;
     double delta_J = 1e-5;
 
+    #ifdef MPI_VERSION
+        MPI_Init(&argc, &argv);
+    #endif
+    
+    int taskid = 0;
+    #ifdef MPI_VERSION
+        MPI_Comm_rank(MPI_COMM_WORLD, &taskid);
+    #endif
+
     // 6. Optimization Loop
     for (int step = 0; step < adam_params.max_epochs; step++) {
         build_hamiltonian(H, J_val, ham_params, lat_params, inversion, N_couplings);
@@ -133,30 +141,32 @@ int main(int argc, char *argv[]) {
         }
 
         // --- TERMINAL PROGRESS BAR ---
-        int bar_width = 30;
-        float progress = (float)(step + 1) / adam_params.max_epochs;
-        int filled = (int)(progress * bar_width);
+        if(taskid == 0) {
+            int bar_width = 30;
+            float progress = (float)(step + 1) / adam_params.max_epochs;
+            int filled = (int)(progress * bar_width);
 
-        // \r returns the cursor to the start of the line without printing a newline
-        printf("\rProgress: [");
-        for (int i = 0; i < bar_width; i++) {
-            if (i < filled) printf("=");
-            else if (i == filled) printf(">");
-            else printf(" ");
+            // \r returns the cursor to the start of the line without printing a newline
+            fprintf(stderr, "\rProgress: [");
+            for (int i = 0; i < bar_width; i++) {
+                if (i < filled) fprintf(stderr, "=");
+                else if (i == filled) fprintf(stderr, ">");
+                else fprintf(stderr, " ");
+            }
+            fprintf(stderr, "] %3d%% | Loss: %8.4f | Fidelity: %.6f | Best: %8.4f", (int)(progress * 100), current_loss, current_fidelity, best_loss);
+            
+            // Force terminal to display the buffer immediately
+            fflush(stdout);
         }
-        printf("] %3d%% | Loss: %8.4f | Fidelity: %.6f | Best: %8.4f", 
-            (int)(progress * 100), current_loss, current_fidelity, best_loss);
-        
-        // Force terminal to display the buffer immediately
-        fflush(stdout);
-
         compute_gradients(grad, J_val, N_couplings, delta_J, ham_params, lat_params, inversion, H, eigenv, eigenvec, psi_0, psi_target, eval_time, size_hilb);
 
         adam_step(J_val, grad, &adam_state, &adam_params, N_couplings);
     }
 
     // Print a newline at the end so the next terminal prompt starts on a fresh line
-    printf("\n");
+    if (taskid == 0) {
+        fprintf(stderr, "\n");
+    }
 
     // 7. Final Evaluation & Output Writing
     build_hamiltonian(H, J_best, ham_params, lat_params, inversion, N_couplings);
@@ -176,6 +186,10 @@ int main(int argc, char *argv[]) {
     safe_free_all(&adam_state, &grad, &H, &eigenv, &eigenvec, &psi_0, &psi_target, NULL, &prob_sites, NULL, &J_val, &J_best, &lat_params, &ham_params);
     
     vslDeleteStream(&stream_d);
+
+    #ifdef MPI_VERSION
+        MPI_Finalize();
+    #endif
 
     return 0;
 }
