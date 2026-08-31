@@ -1,0 +1,48 @@
+#### Parameters ###########################################################
+
+### I am asssuming the following two variables are fixed for this code ####
+Nx = 5
+Ny = 5
+
+#### Range in which to optimize the NN couplings ##########################
+Jmin = -15.0
+Jmax = -1.0
+
+#### Barrier parameters ###################################################
+barrier_height = 4
+barrier_width = 2
+
+#### Random Seed ###############################################
+iran = 13228
+realization = 1
+
+#### Adam Parameters ###############################################
+alpha = 0.001
+beta1 = 0.9
+beta2 = 0.99
+max_epochs = 100000
+
+## Barriers to avoid the out-of-bounds couplings ##########################
+Jpen = 0.001
+P = 100.0
+
+#### Assume inversion symmetry in the couplings? true or false #############
+inversion = true
+
+#### Compute time evolution? true or false ######
+time_evol = true
+n_t_slices = 2001
+
+### The next_variable establishes at which time the QST optimization occur ##
+### Possible values are: ####################################################
+### 1: optimization occurs at t = (pi/2)*ave_J
+### 2: optimization occurs at t = (pi/2)
+### 3: optimization occurs at t = (pi/2)/ave_J
+### 4: optimization occurs at t = (pi*Nx)/(4*J_opt); J_opt depends on several parameters
+opt_time = 4
+
+#### Selecting the initial state: Single excitation or Bell state ####################
+Bell = 0
+
+#### Use the heavy_hex layout instead of the square lattice.
+Heavy_hex = 0;
