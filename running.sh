@@ -39,7 +39,7 @@ if [ -z "$ny" ]; then
     exit 1
 fi
 
-iran_value=$grep -iE "^[[:space:]]*iran" "$INPUT_FILE" | grep -oE "[0-9]+" | head -n 1
+iran_value=$(grep -iE "^[[:space:]]*iran" "$INPUT_FILE" | grep -oE "[0-9]+" | head -n 1
 if [ -z "$iran_value" ]; then
     echo "Warning: iran not found in $INPUT_FILE."
     exit 1
