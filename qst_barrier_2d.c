@@ -62,14 +62,15 @@ int main(int argc, char *argv[])
     int Bell = 0;
     int N_couplings = 0;
     FILE *fpout = NULL;
+    bool progress_bar_enabled = true;
 
-    // 3. Determine input filename (Use CLI arg if provided, fallback to "input.in")
+    // Determine input filename (Use CLI arg if provided, fallback to "input.in")
     const char *input_file = (argc > 1) ? argv[1] : "input.in";
 
-    // 4. Read configuration file using the CLI argument
+    // Read configuration file using the CLI argument
     read_input(input_file, &ham_params, &lat_params, &mc_params, &adam_params, &t_params, &inversion, &realization, &time_evol, &opt_time, &Bell, &use_heavy_hex);
 
-    // 5. Build lattice topology to determine system sizes
+    // Build lattice topology to determine system sizes
     if (use_heavy_hex) {
         build_heavy_hex_lattice(&lat_params, lat_params.Nx);
     } else {
@@ -92,7 +93,7 @@ int main(int argc, char *argv[])
     double t_opt = (PI / 2.0) / ham_params.Jmax; 
     double eval_time = compute_opt_time(opt_time, J_ave, t_opt);
 
-    // 6. Memory Allocations
+    // Memory Allocations
     double *H = malloc_1d_double(size_hilb * size_hilb);
     double *eigenv = malloc_1d_double(size_hilb);
     double *eigenvec = malloc_1d_double(size_hilb * size_hilb);
@@ -106,7 +107,7 @@ int main(int argc, char *argv[])
     // Keep reference in ham_params
     ham_params.J_val = J_val;
 
-    // 7. Initialize random stream & generate initial couplings
+    // Initialize random stream & generate initial couplings
     int seed = mc_params.iran + realization * 1000;
     int status = vslNewStream(&stream_d, VSL_BRNG_MT19937, seed);
     if (status != VSL_STATUS_OK) {
@@ -128,7 +129,7 @@ int main(int argc, char *argv[])
     double delta_J = 1e-5;
     bool progress_bar_enabled = true;
 
-    // 8. Debug Print & File Logging Setup
+    // Debug Print & File Logging Setup
     if (taskid == 0) {
         printf("[C DEBUG] Input File: %s | Loaded Seed: %d | Barrier Height: %f | Initial J[0]: %f\n", 
                input_file, mc_params.iran, ham_params.barrier_height, J_val[0]);
@@ -144,7 +145,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // 9. Optimization Loop
+    // Optimization Loop
     for (int step = 0; step < adam_params.max_epochs; step++) {
         build_hamiltonian(H, J_val, ham_params, lat_params, inversion, N_couplings);
         diagonalize_symmetric(H, eigenv, eigenvec, size_hilb, true);
@@ -195,7 +196,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "\n");
     }
 
-    // 10. Final Evaluation & Output Writing
+    // Final Evaluation & Output Writing
     build_hamiltonian(H, J_best, ham_params, lat_params, inversion, N_couplings);
     diagonalize_symmetric(H, eigenv, eigenvec, size_hilb, true);
 
@@ -244,11 +245,11 @@ void read_input(const char *filename, H_Parameters *ham_params, L_Parameters *la
     char comp_time_evol[50];
     int hex_val = 0;
 
-    // 1. Lattice parameters
+    // Lattice parameters
     parse_parameter(fpin, "Nx", "%d", &(lat_params->Nx));
     parse_parameter(fpin, "Ny", "%d", &(lat_params->Ny));
 
-   // 2. Hamiltonian parameters
+   // Hamiltonian parameters
     parse_parameter(fpin, "Jmin", "%lf", &(ham_params->Jmin));
     parse_parameter(fpin, "Jmax", "%lf", &(ham_params->Jmax));
     parse_parameter(fpin, "barrier_height", "%lf", &(ham_params->barrier_height));
@@ -258,17 +259,17 @@ void read_input(const char *filename, H_Parameters *ham_params, L_Parameters *la
         ERROR("Barrier width must be smaller than the lattice size (Nx).");
     }
 
-    // 3. Random Seed
+    // Random Seed
     parse_parameter(fpin, "iran", "%d", &(mc_params->iran));
     parse_parameter(fpin, "realization", "%d", realization);
 
-    // 4. Adam Optimization Parameters
+    // Adam Optimization Parameters
     parse_parameter(fpin, "alpha", "%lf", &(adam_params->alpha));
     parse_parameter(fpin, "beta1", "%lf", &(adam_params->beta1));
     parse_parameter(fpin, "beta2", "%lf", &(adam_params->beta2));
     parse_parameter(fpin, "max_epochs", "%d", &(adam_params->max_epochs));
 
-   // 5. Penalty / Boundary terms
+   // Penalty / Boundary terms
     parse_parameter(fpin, "Jpen", "%lf", &(mc_params->Jpen));
     parse_parameter(fpin, "P", "%lf", &(mc_params->P));
 
@@ -279,11 +280,11 @@ void read_input(const char *filename, H_Parameters *ham_params, L_Parameters *la
     if(strcmp(comp_time_evol, "true") == 0) *time_evol = true;
     else *time_evol = false;
 
-    // 7. Time & Optimization settings
+    // Time & Optimization settings
     parse_parameter(fpin, "n_t_slices", "%d", &(t_params->n_t_slices));
     parse_parameter(fpin, "opt_time", "%d", opt_time);
 
-    // 8. Initial state and topology
+    // Initial state and topology
     parse_parameter(fpin, "Bell", "%d", Bell);
     parse_parameter(fpin, "Heavy_hex", "%d", &hex_val);
     *use_heavy_hex = (hex_val == 1);
