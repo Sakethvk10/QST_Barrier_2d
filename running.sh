@@ -20,9 +20,6 @@ fi
 
 mkdir -p "$RESULTS_DIR"
 
-# ==========================================
-# 3. Compilation Step
-# ==========================================
 COMPILER=$(command -v mpicc || echo "gcc")
 echo "==> Compiling source files using $COMPILER..."
 
@@ -39,6 +36,8 @@ if [ -z "$ny" ]; then
     exit 1
 fi
 
+let "ny--"
+
 iran_value=$(grep -iE "^[[:space:]]*iran" "$INPUT_FILE" | grep -oE "[0-9]+" | head -n 1
 if [ -z "$iran_value" ]; then
     echo "Warning: iran not found in $INPUT_FILE."
@@ -49,7 +48,7 @@ for bh in $HEIGHT_SEQ; do
     for bw in $WIDTH_SEQ; do
         # Skip if barrier width exceeds the width of the lattice (Ny)
         if [ "$bw" -gt "$ny" ]; then
-            continue
+            break
         fi
 
         TEMP_INPUT="temp_input.in"
