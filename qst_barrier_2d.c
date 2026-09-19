@@ -35,8 +35,19 @@ const int    i_one = 1;
 const int    i_zero = 0;
 const double epsilon = 1e-12;
 
-int main(int argc, char *argv[]) {
-    // 1. Declare local state variables
+int main(int argc, char *argv[]) 
+{
+    // 1. Initialize MPI FIRST
+    #ifdef MPI_VERSION
+        MPI_Init(&argc, &argv);
+    #endif
+    
+    int taskid = 0;
+    #ifdef MPI_VERSION
+        MPI_Comm_rank(MPI_COMM_WORLD, &taskid);
+    #endif
+
+    // 2. Declare local state variables
     L_Parameters lat_params = {0};
     H_Parameters ham_params = {0};
     MC_Parameters mc_params = {0};
@@ -49,12 +60,16 @@ int main(int argc, char *argv[]) {
     int realization = 0;
     int opt_time = 0;
     int Bell = 0;
+    int N_couplings = 0;
     FILE *fpout = NULL;
 
-    // 2. Read configuration file FIRST
-    read_input(&ham_params, &lat_params, &mc_params, &adam_params, &t_params, &inversion, &realization, &time_evol, &opt_time, &Bell, &use_heavy_hex);
+    // 3. Determine input filename (Use CLI arg if provided, fallback to "input.in")
+    const char *input_file = (argc > 1) ? argv[1] : "input.in";
 
-    // 3. Build lattice topology to determine system sizes
+    // 4. Read configuration file using the CLI argument
+    read_input(input_file, &ham_params, &lat_params, &mc_params, &adam_params, &t_params, &inversion, &realization, &time_evol, &opt_time, &Bell, &use_heavy_hex);
+
+    // 5. Build lattice topology to determine system sizes
     if (use_heavy_hex) {
         build_heavy_hex_lattice(&lat_params, lat_params.Nx);
     } else {
@@ -77,10 +92,7 @@ int main(int argc, char *argv[]) {
     double t_opt = (PI / 2.0) / ham_params.Jmax; 
     double eval_time = compute_opt_time(opt_time, J_ave, t_opt);
 
-    open_output_file(ham_params, lat_params, mc_params, inversion, realization, opt_time, use_heavy_hex, &fpout);
-    out_header(fpout, ham_params, lat_params, mc_params);
-
-    // 4. Memory Allocations
+    // 6. Memory Allocations
     double *H = malloc_1d_double(size_hilb * size_hilb);
     double *eigenv = malloc_1d_double(size_hilb);
     double *eigenvec = malloc_1d_double(size_hilb * size_hilb);
@@ -94,7 +106,7 @@ int main(int argc, char *argv[]) {
     // Keep reference in ham_params
     ham_params.J_val = J_val;
 
-    // 5. Initialize random stream & generate initial couplings
+    // 7. Initialize random stream & generate initial couplings
     int seed = mc_params.iran + realization * 1000;
     int status = vslNewStream(&stream_d, VSL_BRNG_MT19937, seed);
     if (status != VSL_STATUS_OK) {
@@ -114,17 +126,25 @@ int main(int argc, char *argv[]) {
 
     double best_loss = 1e9;
     double delta_J = 1e-5;
+    bool progress_bar_enabled = true;
 
-    #ifdef MPI_VERSION
-        MPI_Init(&argc, &argv);
-    #endif
-    
-    int taskid = 0;
-    #ifdef MPI_VERSION
-        MPI_Comm_rank(MPI_COMM_WORLD, &taskid);
-    #endif
+    // 8. Debug Print & File Logging Setup
+    if (taskid == 0) {
+        printf("[C DEBUG] Input File: %s | Loaded Seed: %d | Barrier Height: %f | Initial J[0]: %f\n", 
+               input_file, mc_params.iran, ham_params.barrier_height, J_val[0]);
+        fflush(stdout);
+    }
 
-    // 6. Optimization Loop
+    FILE *ffid_log = NULL;
+    if (taskid == 0) {
+        ffid_log = fopen("fidelity_history.txt", "w");
+        if (ffid_log) {
+            fprintf(ffid_log, "Epoch,Loss,Fidelity,BestLoss\n");
+            fflush(ffid_log);
+        }
+    }
+
+    // 9. Optimization Loop
     for (int step = 0; step < adam_params.max_epochs; step++) {
         build_hamiltonian(H, J_val, ham_params, lat_params, inversion, N_couplings);
         diagonalize_symmetric(H, eigenv, eigenvec, size_hilb, true);
@@ -140,49 +160,67 @@ int main(int argc, char *argv[]) {
             cblas_dcopy(N_couplings, J_val, 1, J_best, 1);
         }
 
-        // --- TERMINAL PROGRESS BAR ---
-        if(taskid == 0) {
-            int bar_width = 30;
-            float progress = (float)(step + 1) / adam_params.max_epochs;
-            int filled = (int)(progress * bar_width);
-
-            // \r returns the cursor to the start of the line without printing a newline
-            fprintf(stderr, "\rProgress: [");
-            for (int i = 0; i < bar_width; i++) {
-                if (i < filled) fprintf(stderr, "=");
-                else if (i == filled) fprintf(stderr, ">");
-                else fprintf(stderr, " ");
+        // --- TERMINAL PROGRESS BAR & LOGGING ---
+        if (taskid == 0 && progress_bar_enabled) {
+            if (ffid_log) {
+                fprintf(ffid_log, "%d,%.8f,%.8f,%.8f\n", 
+                        step + 1, current_loss, current_fidelity, best_loss);
+                fflush(ffid_log);
             }
-            fprintf(stderr, "] %3d%% | Loss: %8.4f | Fidelity: %.6f | Best: %8.4f", (int)(progress * 100), current_loss, current_fidelity, best_loss);
-            
-            // Force terminal to display the buffer immediately
-            fflush(stdout);
+            if (step % 1000 == 0 || step == adam_params.max_epochs - 1) {
+                int bar_width = 30;
+                float progress = (float)(step + 1) / adam_params.max_epochs;
+                int filled = (int)(progress * bar_width);
+
+                fprintf(stderr, "\rProgress: [");
+                for (int i = 0; i < bar_width; i++) {
+                    if (i < filled) fprintf(stderr, "=");
+                    else if (i == filled) fprintf(stderr, ">");
+                    else fprintf(stderr, " ");
+                }
+                fprintf(stderr, "] %3d%% | Loss: %8.4f | Fidelity: %.6f | Best: %8.4f", 
+                        (int)(progress * 100), current_loss, current_fidelity, best_loss);
+                
+                fflush(stderr);
+            }
         }
+
         compute_gradients(grad, J_val, N_couplings, delta_J, ham_params, lat_params, inversion, H, eigenv, eigenvec, psi_0, psi_target, eval_time, size_hilb);
 
         adam_step(J_val, grad, &adam_state, &adam_params, N_couplings);
     }
 
-    // Print a newline at the end so the next terminal prompt starts on a fresh line
-    if (taskid == 0) {
+    if (taskid == 0 && ffid_log) {
+        fclose(ffid_log);
         fprintf(stderr, "\n");
     }
 
-    // 7. Final Evaluation & Output Writing
+    // 10. Final Evaluation & Output Writing
     build_hamiltonian(H, J_best, ham_params, lat_params, inversion, N_couplings);
     diagonalize_symmetric(H, eigenv, eigenvec, size_hilb, true);
 
     double final_probs[2];
     comp_dynamics(final_probs, prob_sites, eigenvec, eigenv, psi_0, psi_target, eval_time, size_hilb);
+    
+    double best_fidelity = 1.0 - (best_loss / (double)size_hilb);
 
-    if (time_evol) write_time_evolution_results(fpout, final_probs, prob_sites, eigenvec, eigenv, psi_0, psi_target, eval_time, t_params.n_t_slices, size_hilb);
+    if (taskid == 0) {
+        open_output_file(ham_params, lat_params, mc_params, inversion, realization, opt_time, use_heavy_hex, &fpout);
+        
+        if (fpout) {
+            out_header(fpout, ham_params, lat_params, mc_params, seed, N_couplings, J_best, best_fidelity, t_params.n_t_slices, size_hilb);
 
-    fclose(fpout);
+            if (time_evol) {
+                write_time_evolution_results(fpout, final_probs, prob_sites, eigenvec, eigenv, psi_0, psi_target, eval_time, t_params.n_t_slices, size_hilb);
+            }
+            
+            fclose(fpout);
+        }
+    }
 
-    // Prevent double-free: detach shared alias before safe_free_all
     ham_params.J_val = NULL;
 
-    // 8. Safe Cleanup
+    // 11. Safe Cleanup
     safe_free_all(&adam_state, &grad, &H, &eigenv, &eigenvec, &psi_0, &psi_target, NULL, &prob_sites, NULL, &J_val, &J_best, &lat_params, &ham_params);
     
     vslDeleteStream(&stream_d);
@@ -195,9 +233,12 @@ int main(int argc, char *argv[]) {
 }
 
 /* ===================== Read input file parameters ========================== */
-void read_input(H_Parameters *ham_params, L_Parameters *lat_params, MC_Parameters *mc_params, Adam_Parameters *adam_params, T_Parameters *t_params, bool *inversion, int *realization, bool *time_evol, int *opt_time, int *Bell, bool *use_heavy_hex){
-    FILE *fpin = fopen("input.in", "r");
-    if (!fpin) ERROR("Can't open/find input file: input.in!\n");
+void read_input(const char *filename, H_Parameters *ham_params, L_Parameters *lat_params, MC_Parameters *mc_params, Adam_Parameters *adam_params, T_Parameters *t_params, bool *inversion, int *realization, bool *time_evol, int *opt_time, int *Bell, bool *use_heavy_hex){
+    FILE *fpin = fopen(filename, "r");
+    if (!fpin) {
+        fprintf(stderr, "\n\nERROR!!! Can't open/find input file: %s\n\n\n", filename);
+        exit(-1);
+    }
 
     char string_inversion[50];
     char comp_time_evol[50];
