@@ -6,8 +6,8 @@ if [ -f /opt/intel/oneapi/setvars.sh ]; then
     source /opt/intel/oneapi/setvars.sh > /dev/null 2>&1 || true
 fi
 
-SRC="qst_barrier_2d_copy.c my_mkl_malloc.c"
-BIN="qst_barrier_2d_copy"
+SRC="qst_barrier_2d.c my_mkl_malloc.c"
+BIN="qst_barrier_2d"
 INPUT_FILE="input.in"
 RESULTS_DIR="results_gridsearch"
 
@@ -15,8 +15,8 @@ RESULTS_DIR="results_gridsearch"
 NP=16
 
 # Define parameter ranges to explore
-ALPHA_LIST="0.001 0.005 0.01 0.05"
-BETA1_LIST="0.9 0.95 0.99"
+ALPHA_LIST="0.1 0.05 0.01"
+BETA1_LIST=" 0.95 0.99 0.995"
 BETA2_LIST="0.99 0.999 0.9999"
 EPOCHS_LIST="100000"
 
@@ -25,10 +25,10 @@ mkdir -p "$RESULTS_DIR"
 # Compile executable
 COMPILER=$(command -v mpicc || echo "gcc")
 echo "==> Compiling source files using $COMPILER..."
-$COMPILER -O3 -fopenmp $SRC \
-    -lmkl_intel_lp64 -lmkl_sequential -lmkl_core \
-    -lpthread -lm -ldl \
-    -o "$BIN"
+$COMPILER -O3 -march=native -ffast-math $SRC \
+  -lmkl_intel_lp64 -lmkl_sequential -lmkl_core \
+  -lpthread -lm -ldl \
+  -o "$BIN"
 
 echo "==> Compilation successful. Starting grid search with NP=$NP..."
 
@@ -45,9 +45,9 @@ for a in $ALPHA_LIST; do
     for b1 in $BETA1_LIST; do
         for b2 in $BETA2_LIST; do
             for ep in $EPOCHS_LIST; do
-            
+
                 echo -e "\n--------------------------------------------------"
-                echo "Running: alpha=$a | beta1=$b1 | beta2=$b2 | epochs=$ep | iran=$CURRENT_IRAN | NP=$NP"
+                echo "Running: alpha=$a | beta1=$b1 | beta2=$b2 | epochs=$ep | iran=$iran_value | NP=$NP"
                 echo "--------------------------------------------------"
 
                 # Update Adam hyperparameters in input.in
@@ -61,7 +61,7 @@ for a in $ALPHA_LIST; do
                 mkdir -p "$TEMP_RUN_DIR"
 
                 # Run simulation
-                mpirun -n "$NP" ./"$BIN" "$INPUT_FILE" > "$TEMP_RUN_DIR"
+                mpirun -n "$NP" ./"$BIN" "$INPUT_FILE" >  /dev/null
 
                 # Move generated logs to temporary execution directory
                 mv fidelity_history.txt "$TEMP_RUN_DIR/" 2>/dev/null || true
@@ -81,7 +81,7 @@ for a in $ALPHA_LIST; do
                 if [ "$IS_BETTER" -eq 1 ]; then
                     BEST_FIDELITY_OVERALL="$MAX_RUN_FIDELITY"
                     BEST_RUN_INFO="alpha=$a | beta1=$b1 | beta2=$b2 | max_epochs=$ep"
-                    BEST_IRAN="$CURRENT_IRAN"
+                    BEST_IRAN="$iran_value"
 
                     # Save rank data files and best input.in configuration
                     rm -rf "${RESULTS_DIR:?}"/*
