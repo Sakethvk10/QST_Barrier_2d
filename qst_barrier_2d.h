@@ -145,7 +145,7 @@ typedef struct {
 } T_Parameters;
 
 /* Function prototypes */
-void read_input(H_Parameters *ham_params, L_Parameters *lat_params, MC_Parameters *mc_params, Adam_Parameters *adam_params, T_Parameters *t_params, bool *inversion, int *realization, bool *time_evol, int *opt_time, int *Bell, bool *use_heavy_hex);
+void read_input(const char *filename, H_Parameters *ham_params, L_Parameters *lat_params, MC_Parameters *mc_params, Adam_Parameters *adam_params, T_Parameters *t_params, bool *inversion, int *realization, bool *time_evol, int *opt_time, int *Bell, bool *use_heavy_hex);
 void open_output_file(H_Parameters ham_params, L_Parameters lat_params, MC_Parameters mc_params, bool inversion, int realization, int opt_time, bool use_heavy_hex, FILE **fpout);
 void out_header(FILE *fpout,H_Parameters ham_params, L_Parameters lat_params, MC_Parameters mc_params);
 void diagonalize_symmetric(double *H, double *eigenv, double *eigenvec, ULI size_hilb, bool get_eigenvec);
