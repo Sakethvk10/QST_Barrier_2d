@@ -10,7 +10,7 @@
 // 6) The code uses MKL's VSL for random number generation
 // 7) We now add an option to select the initial state, single excitation localized at site 0 or a Bell state in the first two sites
 
-#include "qst_barrier_2d_copy.h"
+#include "qst_barrier_2d.h"
 #include <sys/utsname.h>
 
 
@@ -21,9 +21,9 @@
 #define SAFE_MKL_FREE(ptr) mkl_safe_free_ptr((void**)&(ptr))
 #define SAFE_FREE(ptr) safe_free_ptr((void**)&(ptr))
 
-int N_couplings = 0;   // Global variable
+int N_couplings = 0;
 
-/* Global variables - streams of random numbers */
+/* streams of random numbers */
 VSLStreamStatePtr stream_d = NULL;
 
 // Global variables for Lapack routines
@@ -37,17 +37,18 @@ const double epsilon = 1e-12;
 
 int main(int argc, char *argv[]) 
 {
-    // 1. Initialize MPI FIRST
     #ifdef MPI_VERSION
         MPI_Init(&argc, &argv);
     #endif
-    
+
     int taskid = 0;
+    int numtasks = 1;
+
     #ifdef MPI_VERSION
         MPI_Comm_rank(MPI_COMM_WORLD, &taskid);
+        MPI_Comm_size(MPI_COMM_WORLD, &numtasks);
     #endif
 
-    // 2. Declare local state variables
     L_Parameters lat_params = {0};
     H_Parameters ham_params = {0};
     MC_Parameters mc_params = {0};
@@ -61,16 +62,15 @@ int main(int argc, char *argv[])
     int opt_time = 0;
     int Bell = 0;
     int N_couplings = 0;
-    FILE *fpout = NULL;
     bool progress_bar_enabled = true;
+    FILE *fpout = NULL;
 
-    // Determine input filename (Use CLI arg if provided, fallback to "input.in")
+    // Determine input filename
     const char *input_file = (argc > 1) ? argv[1] : "input.in";
 
-    // Read configuration file using the CLI argument
     read_input(input_file, &ham_params, &lat_params, &mc_params, &adam_params, &t_params, &inversion, &realization, &time_evol, &opt_time, &Bell, &use_heavy_hex);
 
-    // Build lattice topology to determine system sizes
+    // Build lattice topology
     if (use_heavy_hex) {
         build_heavy_hex_lattice(&lat_params, lat_params.Nx);
     } else {
@@ -86,7 +86,14 @@ int main(int argc, char *argv[])
     }
 
     if (N_couplings <= 0) {
-        ERROR("Invalid N_couplings calculated from lattice layout!");
+        if (taskid == 0) {
+            fprintf(stderr, "ERROR: Invalid N_couplings calculated from lattice layout!\n");
+        }
+        #ifdef MPI_VERSION
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        #else
+            exit(EXIT_FAILURE);
+        #endif
     }
 
     double J_ave = (ham_params.Jmax + ham_params.Jmin) / 2.0;
@@ -112,7 +119,11 @@ int main(int argc, char *argv[])
     int status = vslNewStream(&stream_d, VSL_BRNG_MT19937, seed);
     if (status != VSL_STATUS_OK) {
         fprintf(stderr, "Error: Failed to initialize MKL random stream (Status code: %d).\n", status);
-        exit(EXIT_FAILURE);
+        #ifdef MPI_VERSION
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        #else
+            exit(EXIT_FAILURE);
+        #endif
     }
 
     vdRngUniform(VSL_RNG_METHOD_UNIFORM_STD, stream_d, N_couplings, J_val, 0.0, 1.0);
@@ -127,14 +138,6 @@ int main(int argc, char *argv[])
 
     double best_loss = 1e9;
     double delta_J = 1e-5;
-    bool progress_bar_enabled = true;
-
-    // Debug Print & File Logging Setup
-    if (taskid == 0) {
-        printf("[C DEBUG] Input File: %s | Loaded Seed: %d | Barrier Height: %f | Initial J[0]: %f\n", 
-               input_file, mc_params.iran, ham_params.barrier_height, J_val[0]);
-        fflush(stdout);
-    }
 
     FILE *ffid_log = NULL;
     if (taskid == 0) {
@@ -168,20 +171,24 @@ int main(int argc, char *argv[])
                         step + 1, current_loss, current_fidelity, best_loss);
                 fflush(ffid_log);
             }
+
             if (step % 1000 == 0 || step == adam_params.max_epochs - 1) {
                 int bar_width = 30;
                 float progress = (float)(step + 1) / adam_params.max_epochs;
                 int filled = (int)(progress * bar_width);
 
-                fprintf(stderr, "\rProgress: [");
+                fprintf(stderr, "\r\033[KProgress: [");
                 for (int i = 0; i < bar_width; i++) {
                     if (i < filled) fprintf(stderr, "=");
                     else if (i == filled) fprintf(stderr, ">");
                     else fprintf(stderr, " ");
                 }
-                fprintf(stderr, "] %3d%% | Loss: %8.4f | Fidelity: %.6f | Best: %8.4f", 
-                        (int)(progress * 100), current_loss, current_fidelity, best_loss);
+                fprintf(stderr, "] %3.1f%% | Loss: %.8f | Fidelity: %.6f | Best: %.8f", 
+                        (progress * 100.0f), current_loss, current_fidelity, best_loss);
                 
+                if (step == adam_params.max_epochs - 1) {
+                    fprintf(stderr, "\n");
+                }
                 fflush(stderr);
             }
         }
@@ -193,7 +200,6 @@ int main(int argc, char *argv[])
 
     if (taskid == 0 && ffid_log) {
         fclose(ffid_log);
-        fprintf(stderr, "\n");
     }
 
     // Final Evaluation & Output Writing
@@ -221,7 +227,7 @@ int main(int argc, char *argv[])
 
     ham_params.J_val = NULL;
 
-    // 11. Safe Cleanup
+    // Safe Cleanup
     safe_free_all(&adam_state, &grad, &H, &eigenv, &eigenvec, &psi_0, &psi_target, NULL, &prob_sites, NULL, &J_val, &J_best, &lat_params, &ham_params);
     
     vslDeleteStream(&stream_d);
@@ -240,7 +246,7 @@ void read_input(const char *filename, H_Parameters *ham_params, L_Parameters *la
         fprintf(stderr, "\n\nERROR!!! Can't open/find input file: %s\n\n\n", filename);
         exit(-1);
     }
-
+    
     char string_inversion[50];
     char comp_time_evol[50];
     int hex_val = 0;
@@ -249,7 +255,7 @@ void read_input(const char *filename, H_Parameters *ham_params, L_Parameters *la
     parse_parameter(fpin, "Nx", "%d", &(lat_params->Nx));
     parse_parameter(fpin, "Ny", "%d", &(lat_params->Ny));
 
-   // Hamiltonian parameters
+    // Hamiltonian parameters
     parse_parameter(fpin, "Jmin", "%lf", &(ham_params->Jmin));
     parse_parameter(fpin, "Jmax", "%lf", &(ham_params->Jmax));
     parse_parameter(fpin, "barrier_height", "%lf", &(ham_params->barrier_height));
@@ -269,7 +275,7 @@ void read_input(const char *filename, H_Parameters *ham_params, L_Parameters *la
     parse_parameter(fpin, "beta2", "%lf", &(adam_params->beta2));
     parse_parameter(fpin, "max_epochs", "%d", &(adam_params->max_epochs));
 
-   // Penalty / Boundary terms
+    // Penalty / Boundary terms
     parse_parameter(fpin, "Jpen", "%lf", &(mc_params->Jpen));
     parse_parameter(fpin, "P", "%lf", &(mc_params->P));
 
@@ -354,38 +360,60 @@ void open_output_file(H_Parameters ham_params, L_Parameters lat_params, MC_Param
     return;
 }
 
-void out_header(FILE *fpout,H_Parameters ham_params, L_Parameters lat_params, MC_Parameters mc_params)
+void out_header(FILE *fpout, H_Parameters ham_params, L_Parameters lat_params, MC_Parameters mc_params, int seed, int N_couplings, double *J_best, double best_fidelity, int n_t_slices, ULI size_hilb)
 {
-    fprintf(fpout, "Nx = %d\tNy = %d\n\n", lat_params.Nx, lat_params.Ny);
-    fprintf(fpout," iran = %d\n\n",mc_params.iran);
-    return;
+    if (!fpout) return;
+
+    fprintf(fpout, "Nx = %d\tNy = %d\n", lat_params.Nx, lat_params.Ny);
+    fprintf(fpout, "iran = %d\n\n", seed);
+
+    // Write converged couplings
+    fprintf(fpout, "Converged couplings:\n");
+    for (int i = 0; i < N_couplings; i++) {
+        fprintf(fpout, "J_%d = %.8f\n", i, J_best[i]);
+    }
+    fprintf(fpout, "\n\nConverged fidelity = %.8f\n\n", best_fidelity);
+
+    // Write time evolution metadata
+    fprintf(fpout, "n_t_slices = %d\n\n", n_t_slices);
+
+    // Write site headers
+    fprintf(fpout, "time");
+    for (ULI i = 0; i < size_hilb; i++) {
+        fprintf(fpout, "\tsite_%ld", i);
+    }
+    fprintf(fpout, "\n");
 }
 
 void diagonalize_symmetric(double *H, double *eigenv, double *eigenvec, ULI size_hilb, bool get_eigenvec)
 {
     int n = (int) size_hilb;
     double wkopt;
+    int iwkopt;
     double *work = NULL;
-    int info, lwork;
+    int *iwork = NULL;
+    int info, lwork, liwork;
 
     cblas_dcopy(size_hilb*size_hilb, H, i_one, eigenvec, i_one);
 
-    if (get_eigenvec) {
-        lwork = -1;
-        dsyev( "v", "u", &n, eigenvec, &n, eigenv, &wkopt, &lwork, &info );
-        lwork = (int)wkopt;
-        work = (double *)mkl_malloc(lwork * sizeof(double), 64);
-        dsyev( "v", "u", &n, eigenvec, &n, eigenv, work, &lwork, &info );
-    } else {
-        lwork = -1;
-        dsyev( "n", "u", &n, eigenvec, &n, eigenv, &wkopt, &lwork, &info );
-        lwork = (int)wkopt;
-        work = (double *)mkl_malloc(lwork * sizeof(double), 64);
-        dsyev( "n", "u", &n, eigenvec, &n, eigenv, work, &lwork, &info );
-    }
+    char jobz = get_eigenvec ? 'V' : 'N';
 
-    if(info!=0) ERROR("Diagonalization failed to converge");
+    lwork = -1;
+    liwork = -1;
+    dsyevd(&jobz, "U", &n, eigenvec, &n, eigenv, &wkopt, &lwork, &iwkopt, &liwork, &info);
+
+    lwork = (int)wkopt;
+    liwork = iwkopt;
+
+    work = (double *)mkl_malloc(lwork * sizeof(double), 64);
+    iwork = (int *)mkl_malloc(liwork * sizeof(int), 64);
+
+    dsyevd(&jobz, "U", &n, eigenvec, &n, eigenv, work, &lwork, iwork, &liwork, &info);
+
+    if(info != 0) ERROR("Diagonalization failed to converge");
+
     SAFE_MKL_FREE(work);
+    SAFE_MKL_FREE(iwork);
 
     return;
 }
@@ -393,12 +421,7 @@ void diagonalize_symmetric(double *H, double *eigenv, double *eigenvec, ULI size
 void write_time_evolution_results(FILE *fpout, double *prob_ini_fin, double *prob_sites, double *eigenvec, double *eigenv, double *psi_0, MKL_Complex16 *psi_target, double eval_time, int n_t_slices, ULI size_hilb) {
     double total_time = fabs(eval_time);
     double dt = (n_t_slices > 1) ? (total_time / (n_t_slices - 1)) : epsilon;
-
-    fprintf(fpout, "n_t_slices = %d\n\n", n_t_slices);
-    fprintf(fpout, "time");
-    for (ULI s = 0; s < size_hilb; s++) {
-        fprintf(fpout, "\tsite_%llu", (unsigned long long)s);
-    }
+    
     fprintf(fpout, "\n");
 
     for (int step = 0; step < n_t_slices; step++) {
@@ -510,14 +533,20 @@ void build_hamiltonian(double *H, double *J_val, H_Parameters ham_params, L_Para
 bool is_barrier_site(int i, L_Parameters lat, H_Parameters ham)
 {
     int x = lat.xcoord[i];
+    int y = lat.ycoord[i];
 
     switch(lat.lattice_type)
     {
     case SQUARE_LATTICE:
+    {
+        int center = (lat.Nx + lat.Ny) / 2;
+        double distance_from_antidiagonal = fabs((x + y) - center) / sqrt(2.0);
+        return fabs((ham.barrier_width / 2.0) - distance_from_antidiagonal) > 0.1;
+    }
     case HEAVY_HEX_LATTICE:
     {
-        int cut = lat.Nx/2;
-        return abs(x-cut) < ham.barrier_width/2.0;
+        int cut = lat.Nx / 2;
+        return fabs(x - cut) < (ham.barrier_width / 2.0);
     }
     default:
         return false;
@@ -747,29 +776,41 @@ void compute_gradients(double *grad, double *J_val, int N_couplings, double delt
     cblas_dcopy(N_couplings, J_val, 1, J_temp, 1);
 
     for (int k = 0; k < N_couplings; k++) {
-        double original_J = J_temp[k];
+        // reallocating to prevent threads from interfering with each other
+        double *J_temp = (double *)mkl_malloc(N_couplings * sizeof(double), 64);
+        double *H = (double *)mkl_malloc(size_hilb * size_hilb * sizeof(double), 64);
+        double *eigenv = (double *)mkl_malloc(size_hilb * sizeof(double), 64);
+        double *eigenvec = (double *)mkl_malloc(size_hilb * size_hilb * sizeof(double), 64);
 
+        cblas_dcopy(N_couplings, J_val, 1, J_temp, 1);
+        H_Parameters local_ham_params = ham_params;
+
+        double original_J = J_temp[k];
         J_temp[k] = original_J + delta_J;
-        ham_params.J_val = J_temp;
-        build_hamiltonian(H, J_temp, ham_params, lat_params, inversion, N_couplings);
+        local_ham_params.J_val = J_temp;
+
+        build_hamiltonian(H, J_temp, local_ham_params, lat_params, inversion, N_couplings);
         diagonalize_symmetric(H, eigenv, eigenvec, size_hilb, true);
+
         double prob_plus[2];
         comp_dynamics(prob_plus, NULL, eigenvec, eigenv, psi_0, psi_target, eval_time, size_hilb);
         double E_plus = (1.0 - prob_plus[1]) * size_hilb;
 
         J_temp[k] = original_J - delta_J;
-        build_hamiltonian(H, J_temp, ham_params, lat_params, inversion, N_couplings);
+        build_hamiltonian(H, J_temp, local_ham_params, lat_params, inversion, N_couplings);
         diagonalize_symmetric(H, eigenv, eigenvec, size_hilb, true);
+
         double prob_minus[2];
         comp_dynamics(prob_minus, NULL, eigenvec, eigenv, psi_0, psi_target, eval_time, size_hilb);
         double E_minus = (1.0 - prob_minus[1]) * size_hilb;
 
         grad[k] = (E_plus - E_minus) / (2.0 * delta_J);
-        J_temp[k] = original_J;
-    }
 
-    SAFE_MKL_FREE(J_temp);
-    ham_params.J_val = J_val;
+        SAFE_MKL_FREE(J_temp);
+        SAFE_MKL_FREE(H);
+        SAFE_MKL_FREE(eigenv);
+        SAFE_MKL_FREE(eigenvec);
+    }
 }
 
 void adam_step(double *J_val, const double *grad, Adam_State *state, Adam_Parameters *adam, int N_couplings) {
