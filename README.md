@@ -1,3 +1,5 @@
 # QST_Barrier_2d
 
-#insert description later
+- [x] task 1
+- [ ] task 2
+- [ ] task 3
