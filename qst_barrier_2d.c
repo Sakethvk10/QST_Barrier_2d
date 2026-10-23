@@ -157,45 +157,72 @@ int main(int argc, char *argv[])
         comp_dynamics(prob_ini_fin, NULL, eigenvec, eigenv, psi_0, psi_target, eval_time, size_hilb);
         
         double current_fidelity = prob_ini_fin[1];
-        double current_loss = (1.0 - current_fidelity) * (double)size_hilb;
+        double infidelity = loss_function(current_fidelity);
+        double penalty = compute_coupling_penalty(J_val, N_couplings, ham_params, mc_params);
+        double current_loss = infidelity + penalty;
 
         if (current_loss < best_loss) {
             best_loss = current_loss;
             cblas_dcopy(N_couplings, J_val, 1, J_best, 1);
         }
 
-        // --- TERMINAL PROGRESS BAR & LOGGING ---
+        // --- TERMINAL PROGRESS BAR ---
         if (taskid == 0 && progress_bar_enabled) {
             if (ffid_log) {
-                fprintf(ffid_log, "%d,%.8f,%.8f,%.8f\n", 
-                        step + 1, current_loss, current_fidelity, best_loss);
+                fprintf(ffid_log, "%d,%.8f,%.8f,%.8f\n", step + 1, current_loss, current_fidelity, best_loss);
                 fflush(ffid_log);
             }
 
-            if (step % 1000 == 0 || step == adam_params.max_epochs - 1) {
+            if (step % 10 == 0 || step == adam_params.max_epochs - 1) {
+                // Open terminal device directly
+                FILE *tty = fopen("/dev/tty", "w");
+                FILE *out = tty ? tty : stderr; // Fallback to stderr if /dev/tty unavailable
+
                 int bar_width = 30;
                 float progress = (float)(step + 1) / adam_params.max_epochs;
                 int filled = (int)(progress * bar_width);
 
-                fprintf(stderr, "\r\033[KProgress: [");
+                fprintf(out, "Epoch %06d/%d [", step + 1, adam_params.max_epochs);
                 for (int i = 0; i < bar_width; i++) {
-                    if (i < filled) fprintf(stderr, "=");
-                    else if (i == filled) fprintf(stderr, ">");
-                    else fprintf(stderr, " ");
+                    if (i < filled) fprintf(out, "=");
+                    else if (i == filled) fprintf(out, ">");
+                    else fprintf(out, " ");
                 }
-                fprintf(stderr, "] %3.1f%% | Loss: %.8f | Fidelity: %.6f | Best: %.8f", 
-                        (progress * 100.0f), current_loss, current_fidelity, best_loss);
                 
+                fprintf(out, "] %3.1f%% | Loss: %.8f | Fidelity: %.6f | Best: %.8f | Iran: %d\r", 
+                        (progress * 100.0f), current_loss, current_fidelity, best_loss, mc_params.iran);
+                fflush(out);
+
                 if (step == adam_params.max_epochs - 1) {
-                    fprintf(stderr, "\n");
+                    fprintf(out, "\n");
+                    fflush(out);
                 }
-                fflush(stderr);
+
+                if (tty) fclose(tty);
             }
         }
 
-        compute_gradients(grad, J_val, N_couplings, delta_J, ham_params, lat_params, inversion, H, eigenv, eigenvec, psi_0, psi_target, eval_time, size_hilb);
+        // Compute local gradients
+        compute_gradients(grad, J_val, N_couplings, delta_J, ham_params, lat_params, mc_params, inversion, H, eigenv, eigenvec, psi_0, psi_target, eval_time, size_hilb);
 
-        adam_step(J_val, grad, &adam_state, &adam_params, N_couplings);
+        // MPI GRADIENT REDUCTION Across all ranks
+        #ifdef MPI_VERSION
+            MPI_Allreduce(MPI_IN_PLACE, grad, N_couplings, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        #endif
+
+        // ADAM STEP (Rank 0 updates)
+        if (taskid == 0) {
+            adam_step(J_val, grad, &adam_state, &adam_params, N_couplings);
+            for (int i = 0; i < N_couplings; i++) {
+                if (J_val[i] < ham_params.Jmin) J_val[i] = ham_params.Jmin;
+                if (J_val[i] > ham_params.Jmax) J_val[i] = ham_params.Jmax;
+            }
+        }
+
+        // ROADCAST UPDATED PARAMETERS To all worker ranks
+        #ifdef MPI_VERSION
+            MPI_Bcast(J_val, N_couplings, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        #endif
     }
 
     if (taskid == 0 && ffid_log) {
@@ -209,7 +236,8 @@ int main(int argc, char *argv[])
     double final_probs[2];
     comp_dynamics(final_probs, prob_sites, eigenvec, eigenv, psi_0, psi_target, eval_time, size_hilb);
     
-    double best_fidelity = 1.0 - (best_loss / (double)size_hilb);
+    // Updated to match unscaled loss definition
+    double best_fidelity = loss_function(best_loss);
 
     if (taskid == 0) {
         open_output_file(ham_params, lat_params, mc_params, inversion, realization, opt_time, use_heavy_hex, &fpout);
@@ -319,6 +347,30 @@ void parse_parameter(FILE *fpin, const char *param_name, const char *format, voi
     }
     fprintf(stderr, "Input read error: '%s' parameter not found or incorrectly formatted.\n", param_name);
     exit(1);
+}
+
+double loss_function(double fidelity) {
+    return pow(1-fidelity,2);
+}
+
+double compute_coupling_penalty(double *J_val, int N_couplings, H_Parameters ham_params, MC_Parameters mc_params) {
+    double penalty = 0.0;
+    double jmin = ham_params.Jmin;
+    double jmax = ham_params.Jmax;
+
+    for (int i = 0; i < N_couplings; i++) {
+        double val = J_val[i];
+        double violation = 0.0;
+        if (val < jmin) {
+            violation = jmin - val;
+        } else if (val > jmax) {
+            violation = val - jmax;
+        }
+        if (violation > 0.0) {
+            penalty += mc_params.Jpen * pow(violation, mc_params.P);
+        }
+    }
+    return penalty;
 }
 
 double compute_opt_time(int opt_time, double J_ave, double t_opt) {
@@ -445,7 +497,7 @@ static inline void mkl_safe_free_ptr(void **ptr) {
 
 static inline void safe_free_ptr(void **ptr) {
     if (ptr && *ptr) {
-        mkl_free(*ptr);
+        free(*ptr);
         *ptr = NULL; // Prevents double-free on repeated references
     }
 }
@@ -456,7 +508,6 @@ void safe_free_all(Adam_State *adam_state, double **grad, double **H, double **e
         if (adam_state->v) { mkl_free(adam_state->v); adam_state->v = NULL; }
     }
     
-    // Safely verify double pointers before dereferencing and freeing
     if (grad && *grad)         { mkl_free(*grad); *grad = NULL; }
     if (H && *H)               { mkl_free(*H); *H = NULL; }
     if (eigenv && *eigenv)     { mkl_free(*eigenv); *eigenv = NULL; }
@@ -466,9 +517,20 @@ void safe_free_all(Adam_State *adam_state, double **grad, double **H, double **e
     if (U && *U)               { mkl_free(*U); *U = NULL; }
     if (prob_sites && *prob_sites) { mkl_free(*prob_sites); *prob_sites = NULL; }
     if (prob_ini_fin && *prob_ini_fin) { mkl_free(*prob_ini_fin); *prob_ini_fin = NULL; }
-    if (J_temp && *J_temp)     { mkl_free(*J_temp); *J_temp = NULL; }
-    if (J_best && *J_best)     { mkl_free(*J_best); *J_best = NULL; }
 
+    // Free J_temp
+    if (J_temp && *J_temp) {
+        // If h->J_val points to this same memory block, clear it to prevent double free
+        if (h && h->J_val == *J_temp) {
+            h->J_val = NULL;
+        }
+        mkl_free(*J_temp);
+        *J_temp = NULL;
+    }
+
+    if (J_best && *J_best) { mkl_free(*J_best); *J_best = NULL; }
+
+    // Safely check h->J_val
     if (h && h->J_val) {
         mkl_free(h->J_val);
         h->J_val = NULL;
@@ -771,16 +833,14 @@ double get_ave_coupling(double *J)
     return ave;
 }
 
-void compute_gradients(double *grad, double *J_val, int N_couplings, double delta_J, H_Parameters ham_params, L_Parameters lat_params, bool inversion, double *H, double *eigenv, double *eigenvec, double *psi_0, MKL_Complex16 *psi_target, double eval_time, ULI size_hilb) {
-    double *J_temp = malloc_1d_double(N_couplings);
-    cblas_dcopy(N_couplings, J_val, 1, J_temp, 1);
+void compute_gradients(double *grad, double *J_val, int N_couplings, double delta_J, H_Parameters ham_params, L_Parameters lat_params, MC_Parameters mc_params, bool inversion, double *H, double *eigenv, double *eigenvec, double *psi_0, MKL_Complex16 *psi_target, double eval_time, ULI size_hilb) {
 
     for (int k = 0; k < N_couplings; k++) {
         // reallocating to prevent threads from interfering with each other
         double *J_temp = (double *)mkl_malloc(N_couplings * sizeof(double), 64);
-        double *H = (double *)mkl_malloc(size_hilb * size_hilb * sizeof(double), 64);
-        double *eigenv = (double *)mkl_malloc(size_hilb * sizeof(double), 64);
-        double *eigenvec = (double *)mkl_malloc(size_hilb * size_hilb * sizeof(double), 64);
+        double *H_loc = (double *)mkl_malloc(size_hilb * size_hilb * sizeof(double), 64);
+        double *eigenv_loc = (double *)mkl_malloc(size_hilb * sizeof(double), 64);
+        double *eigenvec_loc = (double *)mkl_malloc(size_hilb * size_hilb * sizeof(double), 64);
 
         cblas_dcopy(N_couplings, J_val, 1, J_temp, 1);
         H_Parameters local_ham_params = ham_params;
@@ -789,27 +849,27 @@ void compute_gradients(double *grad, double *J_val, int N_couplings, double delt
         J_temp[k] = original_J + delta_J;
         local_ham_params.J_val = J_temp;
 
-        build_hamiltonian(H, J_temp, local_ham_params, lat_params, inversion, N_couplings);
-        diagonalize_symmetric(H, eigenv, eigenvec, size_hilb, true);
+        build_hamiltonian(H_loc, J_temp, local_ham_params, lat_params, inversion, N_couplings);
+        diagonalize_symmetric(H_loc, eigenv_loc, eigenvec_loc, size_hilb, true);
 
         double prob_plus[2];
-        comp_dynamics(prob_plus, NULL, eigenvec, eigenv, psi_0, psi_target, eval_time, size_hilb);
+        comp_dynamics(prob_plus, NULL, eigenvec_loc, eigenv_loc, psi_0, psi_target, eval_time, size_hilb);
         double E_plus = (1.0 - prob_plus[1]) * size_hilb;
 
         J_temp[k] = original_J - delta_J;
-        build_hamiltonian(H, J_temp, local_ham_params, lat_params, inversion, N_couplings);
-        diagonalize_symmetric(H, eigenv, eigenvec, size_hilb, true);
+        build_hamiltonian(H_loc, J_temp, local_ham_params, lat_params, inversion, N_couplings);
+        diagonalize_symmetric(H_loc, eigenv_loc, eigenvec_loc, size_hilb, true);
 
         double prob_minus[2];
-        comp_dynamics(prob_minus, NULL, eigenvec, eigenv, psi_0, psi_target, eval_time, size_hilb);
+        comp_dynamics(prob_minus, NULL, eigenvec_loc, eigenv_loc, psi_0, psi_target, eval_time, size_hilb);
         double E_minus = (1.0 - prob_minus[1]) * size_hilb;
 
         grad[k] = (E_plus - E_minus) / (2.0 * delta_J);
 
         SAFE_MKL_FREE(J_temp);
-        SAFE_MKL_FREE(H);
-        SAFE_MKL_FREE(eigenv);
-        SAFE_MKL_FREE(eigenvec);
+        SAFE_MKL_FREE(H_loc);
+        SAFE_MKL_FREE(eigenv_loc);
+        SAFE_MKL_FREE(eigenvec_loc);
     }
 }
 
